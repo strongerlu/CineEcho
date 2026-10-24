@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+app/build/
+app/out/
+.DS_Store

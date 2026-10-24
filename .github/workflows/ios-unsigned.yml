@@ -1,0 +1,59 @@
+# Builds an UNSIGNED CineEcho.ipa on a free GitHub macOS runner.
+# Sign & install it on your own iPhone with Sideloadly / AltStore and a free Apple ID (see README).
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: npm ci
+
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Build (Release, no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/CineEcho.xcworkspace \
+            -scheme CineEcho \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            > build.log 2>&1 || { grep -E "error:|\*\* BUILD" build.log | head -n 60; tail -n 60 build.log; exit 1; }
+          tail -n 5 build.log
+
+      - name: Package IPA
+        run: |
+          rm -rf out && mkdir -p out/Payload
+          cp -R build/Build/Products/Release-iphoneos/CineEcho.app out/Payload/
+          cd out && zip -qry CineEcho-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CineEcho-unsigned-ipa
+          path: app/out/CineEcho-unsigned.ipa
+          retention-days: 30

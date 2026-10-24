@@ -1,0 +1,11 @@
+services:
+  cineecho:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      CINEECHO_PASSWORD: ${CINEECHO_PASSWORD:?set CINEECHO_PASSWORD in .env}
+      FFMPEG_CONCURRENCY: ${FFMPEG_CONCURRENCY:-4}
+    volumes:
+      - ./data:/data

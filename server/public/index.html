@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CineEcho 管理后台</title>
+<style>
+  :root { color-scheme: light dark; --accent: #e5a50a; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; max-width: 960px; margin-inline: auto; }
+  h1 { margin: 0 0 16px; font-size: 22px; display: flex; justify-content: space-between; align-items: center; }
+  .card { border: 1px solid #8884; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+  label { display: block; margin: 10px 0 4px; font-size: 14px; opacity: .8; }
+  input[type=text], input[type=password] { width: 100%; padding: 8px; font-size: 15px; border-radius: 6px; border: 1px solid #8886; }
+  button { padding: 8px 14px; border-radius: 6px; border: 1px solid #8886; cursor: pointer; font-size: 14px; background: transparent; color: inherit; }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #8883; vertical-align: middle; }
+  .status-ready { color: #2a9d4b; } .status-failed { color: #d33; } .status-processing, .status-pending { color: var(--accent); }
+  .err { color: #d33; font-size: 13px; white-space: pre-wrap; }
+  progress { width: 100%; }
+  .row-actions button { margin-right: 4px; padding: 4px 8px; font-size: 13px; }
+  .hidden { display: none; }
+  .hint { font-size: 13px; opacity: .7; }
+  .poster { width: 48px; height: 72px; border-radius: 4px; object-fit: cover; display: block; background: #8883; }
+  .poster-empty { display: flex; align-items: center; justify-content: center; font-weight: 700; opacity: .7; }
+</style>
+</head>
+<body>
+<div id="login" class="card hidden" style="max-width:360px;margin:80px auto">
+  <h1>CineEcho 登录</h1>
+  <form id="loginForm">
+    <label for="pw">密码</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <p id="loginErr" class="err"></p>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</div>
+
+<div id="main" class="hidden">
+  <h1>CineEcho 管理后台 <button id="logout">退出</button></h1>
+
+  <div class="card">
+    <form id="uploadForm">
+      <label for="title">标题（可选，默认用音频文件名）</label>
+      <input id="title" type="text" placeholder="例如：The Shawshank Redemption">
+      <label for="audio">电影音频 / 视频文件</label>
+      <input id="audio" type="file" accept="audio/*,video/*,.mkv,.mka" required>
+      <label for="subtitle">英文 SRT 字幕（必需，时间轴需与音频一致）</label>
+      <input id="subtitle" type="file" accept=".srt" required>
+      <label for="poster">海报图片（可选，jpg/png/webp）</label>
+      <input id="poster" type="file" accept="image/*">
+      <p class="hint">服务器会严格按字幕时间轴切出每一句对白，去掉无对白部分。</p>
+      <progress id="uploadProgress" class="hidden" max="100" value="0"></progress>
+      <p id="uploadErr" class="err"></p>
+      <button class="primary" type="submit" id="uploadBtn">上传并处理</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>海报</th><th>标题</th><th>状态</th><th>句数</th><th>对白时长</th><th>大小</th><th></th></tr></thead>
+      <tbody id="list"></tbody>
+    </table>
+    <input id="posterPicker" type="file" accept="image/*" class="hidden">
+    <p id="empty" class="hint hidden">还没有电影，先上传一部吧。</p>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusText = { pending: '排队中', processing: '处理中', ready: '就绪', failed: '失败' };
+let pollTimer = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { credentials: 'same-origin', ...opts });
+  if (res.status === 401) { show('login'); throw new Error('未登录'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function show(which) {
+  $('login').classList.toggle('hidden', which !== 'login');
+  $('main').classList.toggle('hidden', which !== 'main');
+}
+
+const fmtDur = (s) => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}时${m}分` : `${m}分${s % 60}秒`; };
+const fmtSize = (b) => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB';
+const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function refresh() {
+  const { movies } = await api('/api/movies');
+  show('main');
+  $('empty').classList.toggle('hidden', movies.length > 0);
+  $('list').innerHTML = movies.map((m) => `
+    <tr data-id="${m.id}">
+      <td>${m.posterAt
+        ? `<img class="poster" src="/api/movies/${m.id}/poster?v=${encodeURIComponent(m.posterAt)}" alt="">`
+        : `<div class="poster poster-empty">${esc(m.title.trim().charAt(0).toUpperCase() || '?')}</div>`}</td>
+      <td>${esc(m.title)}${m.error ? `<div class="err">${esc(m.error)}</div>` : ''}</td>
+      <td class="status-${m.status}">${statusText[m.status]}${m.status === 'processing' ? ` ${m.progress}%` : ''}</td>
+      <td>${m.segmentCount || '-'}</td>
+      <td>${m.duration ? fmtDur(m.duration) : '-'}</td>
+      <td>${m.sizeBytes ? fmtSize(m.sizeBytes) : '-'}</td>
+      <td class="row-actions">
+        <button data-act="rename">改名</button>
+        <button data-act="poster">${m.posterAt ? '换海报' : '传海报'}</button>
+        ${m.posterAt ? '<button data-act="unposter">删海报</button>' : ''}
+        ${m.status === 'ready' || m.status === 'failed' ? '<button data-act="reprocess">重新处理</button>' : ''}
+        <button data-act="delete">删除</button>
+      </td>
+    </tr>`).join('');
+  clearTimeout(pollTimer);
+  if (movies.some((m) => m.status === 'pending' || m.status === 'processing')) pollTimer = setTimeout(refresh, 2000);
+}
+
+$('list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.closest('tr').dataset.id;
+  try {
+    if (btn.dataset.act === 'delete') {
+      if (!confirm('确定删除？')) return;
+      await api(`/api/movies/${id}`, { method: 'DELETE' });
+    } else if (btn.dataset.act === 'rename') {
+      const title = prompt('新标题');
+      if (!title) return;
+      await api(`/api/movies/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) });
+    } else if (btn.dataset.act === 'reprocess') {
+      await api(`/api/movies/${id}/reprocess`, { method: 'POST' });
+    } else if (btn.dataset.act === 'poster') {
+      posterTarget = id;
+      $('posterPicker').value = '';
+      $('posterPicker').click();
+      return;
+    } else if (btn.dataset.act === 'unposter') {
+      if (!confirm('删除海报？')) return;
+      await api(`/api/movies/${id}/poster`, { method: 'DELETE' });
+    }
+    await refresh();
+  } catch (err) { alert(err.message); }
+});
+
+let posterTarget = null;
+$('posterPicker').addEventListener('change', async () => {
+  const file = $('posterPicker').files[0];
+  if (!file || !posterTarget) return;
+  const fd = new FormData();
+  fd.append('poster', file);
+  try {
+    await api(`/api/movies/${posterTarget}/poster`, { method: 'PUT', body: fd });
+    await refresh();
+  } catch (err) { alert(err.message); }
+});
+
+$('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('loginErr').textContent = '';
+  try {
+    await api('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: $('pw').value }) });
+    await refresh();
+  } catch (err) { $('loginErr').textContent = err.message; }
+});
+
+$('logout').addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  show('login');
+});
+
+$('uploadForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append('title', $('title').value);
+  fd.append('audio', $('audio').files[0]);
+  fd.append('subtitle', $('subtitle').files[0]);
+  if ($('poster').files[0]) fd.append('poster', $('poster').files[0]);
+  const xhr = new XMLHttpRequest();
+  const bar = $('uploadProgress');
+  $('uploadErr').textContent = '';
+  $('uploadBtn').disabled = true;
+  bar.classList.remove('hidden');
+  bar.value = 0;
+  xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) bar.value = ev.loaded / ev.total * 100; };
+  xhr.onloadend = async () => {
+    $('uploadBtn').disabled = false;
+    bar.classList.add('hidden');
+    if (xhr.status === 201) {
+      $('uploadForm').reset();
+    } else {
+      let msg = xhr.statusText || '上传失败';
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
+      $('uploadErr').textContent = msg;
+    }
+    refresh().catch(() => {});
+  };
+  xhr.open('POST', '/api/movies');
+  xhr.send(fd);
+});
+
+refresh().catch(() => show('login'));
+</script>
+</body>
+</html>
